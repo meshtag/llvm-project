@@ -902,6 +902,8 @@ static VectorMemoryAccessKind
 getTensorExtractMemoryAccessPattern(tensor::ExtractOp extractOp,
                                     LinalgOp &linalgOp) {
 
+  return VectorMemoryAccessKind::Contiguous;
+
   auto targetShape = linalgOp.getStaticLoopRanges();
   auto inputShape = cast<ShapedType>(extractOp.getTensor().getType());
 
