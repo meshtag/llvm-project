@@ -788,9 +788,9 @@ enum VectorMemoryAccessKind { ScalarBroadcast, Contiguous, Gather };
 static bool isLoopInvariantIdx(LinalgOp &linalgOp, Value &val) {
 
   auto targetShape = linalgOp.getStaticLoopRanges();
-  assert(((llvm::count_if(targetShape,
-                          [](int64_t dimSize) { return dimSize > 1; }) == 1)) &&
-         "n-D vectors are not yet supported");
+  // assert(((llvm::count_if(targetShape,
+  //                         [](int64_t dimSize) { return dimSize > 1; }) == 1)) &&
+  //        "n-D vectors are not yet supported");
   assert(targetShape.back() != 1 &&
          "1-D vectors with the trailing dim eqaual 1 are not yet supported");
 
@@ -850,9 +850,9 @@ static bool isContiguousLoadIdx(LinalgOp &linalgOp, Value &val,
                                 bool &foundIndexOp) {
 
   auto targetShape = linalgOp.getStaticLoopRanges();
-  assert(((llvm::count_if(targetShape,
-                          [](int64_t dimSize) { return dimSize > 1; }) == 1)) &&
-         "n-D vectors are not yet supported");
+  // assert(((llvm::count_if(targetShape,
+  //                         [](int64_t dimSize) { return dimSize > 1; }) == 1)) &&
+  //        "n-D vectors are not yet supported");
   assert(targetShape.back() != 1 &&
          "1-D vectors with the trailing dim 1 are not yet supported");
 
@@ -902,7 +902,7 @@ static VectorMemoryAccessKind
 getTensorExtractMemoryAccessPattern(tensor::ExtractOp extractOp,
                                     LinalgOp &linalgOp) {
 
-  return VectorMemoryAccessKind::Contiguous;
+  // return VectorMemoryAccessKind::Contiguous;
 
   auto targetShape = linalgOp.getStaticLoopRanges();
   auto inputShape = cast<ShapedType>(extractOp.getTensor().getType());
@@ -917,14 +917,17 @@ getTensorExtractMemoryAccessPattern(tensor::ExtractOp extractOp,
   if (linalgOp.hasDynamicShape())
     return VectorMemoryAccessKind::Gather;
 
-  // 1. Assume that it's a gather load when reading _into_:
-  //    * an n-D vector, like`tensor<1x2x4xi32` or`tensor<2x1x4xi32>`, or
-  //    * a 1-D vector with the trailing dim equal 1, e.g. `tensor<1x4x1xi32`.
-  // TODO: Relax these conditions.
-  // FIXME: This condition assumes non-dynamic sizes.
-  if ((llvm::count_if(targetShape,
-                      [](int64_t dimSize) { return dimSize > 1; }) != 1) ||
-      targetShape.back() == 1)
+  // // 1. Assume that it's a gather load when reading _into_:
+  // //    * an n-D vector, like`tensor<1x2x4xi32` or`tensor<2x1x4xi32>`, or
+  // //    * a 1-D vector with the trailing dim equal 1, e.g. `tensor<1x4x1xi32`.
+  // // TODO: Relax these conditions.
+  // // FIXME: This condition assumes non-dynamic sizes.
+  // if ((llvm::count_if(targetShape,
+  //                     [](int64_t dimSize) { return dimSize > 1; }) != 1) ||
+  //     targetShape.back() == 1)
+  //   return VectorMemoryAccessKind::Gather;
+
+  if (targetShape.back() == 1)
     return VectorMemoryAccessKind::Gather;
 
   // 2. Assume that it's a gather load when reading _from_ a tensor for which
@@ -1060,11 +1063,24 @@ vectorizeTensorExtract(RewriterBase &rewriter, VectorizationState &state,
       continue;
     }
 
-    auto indexAs1dVector = rewriter.create<vector::ShapeCastOp>(
-        loc, VectorType::get({resTrailingDim}, rewriter.getIndexType()),
-        bvm.lookup(extractOp.getIndices()[i]));
-    transferReadIdxs.push_back(
-        rewriter.create<vector::ExtractElementOp>(loc, indexAs1dVector, zero));
+    // auto indexAs1dVector = rewriter.create<vector::ShapeCastOp>(
+    //     loc, VectorType::get({resTrailingDim}, rewriter.getIndexType()),
+    //     bvm.lookup(extractOp.getIndices()[i]));
+
+    // indexAs1dVector.dump();
+    llvm::ArrayRef<int64_t> checkArr({0});
+    auto check = rewriter.create<vector::ExtractOp>(loc, idx, checkArr);
+    // check.dump();
+    // check.getResult().dump();
+
+    auto checkZero = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getIndexType(), rewriter.getZeroAttr(rewriter.getIndexType()));
+
+    // transferReadIdxs.push_back(
+    //     rewriter.create<vector::ExtractElementOp>(loc, indexAs1dVector, zero));
+  
+    // transferReadIdxs.push_back(check.getResult());
+    transferReadIdxs.push_back(checkZero);
   }
 
   // `tensor.extract_element` is always in-bounds, hence the following holds.
