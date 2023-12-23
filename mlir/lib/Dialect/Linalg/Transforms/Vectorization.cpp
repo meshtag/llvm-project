@@ -1070,7 +1070,7 @@ vectorizeTensorExtract(RewriterBase &rewriter, VectorizationState &state,
     // indexAs1dVector.dump();
     llvm::ArrayRef<int64_t> checkArr({0});
     auto check = rewriter.create<vector::ExtractOp>(loc, idx, checkArr);
-    // check.dump();
+    check.dump();
     // check.getResult().dump();
 
     auto checkZero = rewriter.create<arith::ConstantOp>(
