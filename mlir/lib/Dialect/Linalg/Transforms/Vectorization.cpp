@@ -436,6 +436,8 @@ VectorizationState::maskOperation(RewriterBase &rewriter, Operation *opToMask,
     rewriter.replaceAllUsesExcept(resVal, maskOp.getResult(resIdx),
                                   maskOpTerminator);
 
+  maskOp.dump();
+
   LDBG("Masked operation: " << *maskOp << "\n");
   return maskOp;
 }

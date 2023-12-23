@@ -550,3 +550,76 @@ module attributes {transform.with_named_sequence} {
      transform.yield
    }
 }
+
+// -----
+
+func.func @vectorize_nd_tensor_extract_mask_and_gather(%arg0: tensor<80x16xf32>, %extracted_slice : tensor<4x4xf32>) -> tensor<4x4xf32> {
+  %comparator_value = arith.constant 2 : index
+  %value = arith.constant 2.0 : f32
+  %1 = linalg.generic {
+    indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>],
+    iterator_types = ["parallel", "parallel"]
+  } outs(%extracted_slice : tensor<4x4xf32>) {
+  ^bb0(%out: f32):
+    %2 = linalg.index 0 : index
+    %3 = linalg.index 1 : index
+    
+    %condition = arith.cmpi "eq", %3, %comparator_value : index
+    %final_value = scf.if %condition -> f32 {
+      scf.yield %value : f32
+    } else {
+      %extracted = tensor.extract %arg0[%2, %3] : tensor<80x16xf32>
+      scf.yield %extracted : f32
+    }
+
+    linalg.yield %final_value : f32
+  } -> tensor<4x4xf32>
+  return %1 : tensor<4x4xf32>
+}
+
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @__transform_main(%arg1: !transform.any_op {transform.readonly}) {
+     %0 = transform.structured.match ops{["linalg.generic"]} in %arg1 : (!transform.any_op) -> !transform.any_op
+     %1 = transform.get_parent_op %0 {isolated_from_above} : (!transform.any_op) -> !transform.any_op
+     %2 = transform.structured.vectorize_children_and_apply_patterns %1 { vectorize_nd_extract } : (!transform.any_op) -> !transform.any_op
+     transform.yield
+   }
+}
+
+// -----
+
+#map0 = affine_map<(d0, d1, d2, d3) -> (d0, d2)>
+#map1 = affine_map<(d0, d1, d2, d3) -> (d0, d1, d2, d3)>
+func.func @vectorize_1d_tensor_extract(%arg0: tensor<3xf32>, %arg1: tensor<4x3xi32>, %arg2: tensor<4x7x3x2xf32>) -> tensor<4x7x3x2xf32> {
+  %1 = linalg.generic {
+    indexing_maps = [#map0, #map1],
+    iterator_types = ["parallel", "parallel", "parallel", "parallel"]
+  } ins(%arg1 : tensor<4x3xi32>) outs(%arg2 : tensor<4x7x3x2xf32>) {
+  ^bb0(%arg3: i32, %arg4: f32):
+    %2 = arith.index_cast %arg3 : i32 to index
+    %3 = tensor.extract %arg0[%2] : tensor<3xf32>
+    linalg.yield %3 : f32
+  } -> tensor<4x7x3x2xf32>
+  return %1 : tensor<4x7x3x2xf32>
+}
+// CHECK-LABEL: func.func @vectorize_1d_tensor_extract
+// CHECK-SAME:    %[[ARG0:.*]]: tensor<3xf32>
+// CHECK-SAME:    %[[ARG1:.*]]: tensor<4x3xi32>
+// CHECK: %[[C0:.*]] = arith.constant 0 : index
+// CHECK: %[[MASK:.*]] = arith.constant dense<true> : vector<4x7x3x2xi1>
+// CHECK: %[[PASSTHRU:.*]] = arith.constant dense<0.000000e+00> : vector<4x7x3x2xf32>
+// CHECK: %[[V0:.*]] = vector.transfer_read %[[ARG1]]
+// CHECK: %[[CAST:.*]] = arith.index_cast %[[V0]]
+// CHECK: %[[BROADCAST:.*]] = vector.broadcast %[[CAST]]
+// CHECK: %[[INDICES:.*]] = vector.transpose %[[BROADCAST]]
+// CHECK: %[[GATHER:.*]] = vector.gather %[[ARG0]][%[[C0]]] [%[[INDICES]]], %[[MASK]], %[[PASSTHRU]]
+// CHECK: vector.transfer_write %[[GATHER]]
+
+module attributes {transform.with_named_sequence} {
+  transform.named_sequence @__transform_main(%arg1: !transform.any_op {transform.readonly}) {
+    %0 = transform.structured.match ops{["linalg.generic"]} in %arg1 : (!transform.any_op) -> !transform.any_op
+    %1 = transform.get_parent_op %0 {isolated_from_above} : (!transform.any_op) -> !transform.any_op
+    transform.structured.vectorize %1 vector_sizes [[4]] : !transform.any_op
+    transform.yield
+  }
+}
