@@ -789,7 +789,7 @@ static bool isLoopInvariantIdx(LinalgOp &linalgOp, Value &val) {
 
   auto targetShape = linalgOp.getStaticLoopRanges();
   assert(((llvm::count_if(targetShape,
-                          [](int64_t dimSize) { return dimSize > 1; }) == 1)) &&
+                          [](int64_t dimSize) { return dimSize > 1; }) <= 2)) &&
          "n-D vectors are not yet supported");
   assert(targetShape.back() != 1 &&
          "1-D vectors with the trailing dim eqaual 1 are not yet supported");
@@ -851,7 +851,7 @@ static bool isContiguousLoadIdx(LinalgOp &linalgOp, Value &val,
 
   auto targetShape = linalgOp.getStaticLoopRanges();
   assert(((llvm::count_if(targetShape,
-                          [](int64_t dimSize) { return dimSize > 1; }) == 1)) &&
+                          [](int64_t dimSize) { return dimSize > 1; }) <= 2)) &&
          "n-D vectors are not yet supported");
   assert(targetShape.back() != 1 &&
          "1-D vectors with the trailing dim 1 are not yet supported");
@@ -869,10 +869,12 @@ static bool isContiguousLoadIdx(LinalgOp &linalgOp, Value &val,
   assert(defOp && "This is neither a block argument nor an operation result");
 
   // Given the assumption on the loop ranges above, only the trailing loop
-  // index is not constant.
-  auto trailingLoopDim = linalgOp.getStaticLoopRanges().size() - 1;
+  // index and the one before that is not constant.
+  auto trailingLoopDim0 = linalgOp.getStaticLoopRanges().size() - 1;
+  auto trailingLoopDim1 = linalgOp.getStaticLoopRanges().size() - 2;
   if (auto indexOp = dyn_cast<linalg::IndexOp>(defOp)) {
-    foundIndexOp = (indexOp.getDim() == trailingLoopDim);
+    foundIndexOp = (indexOp.getDim() == trailingLoopDim0);
+    foundIndexOp |= (indexOp.getDim() == trailingLoopDim1);
     return true;
   }
 
@@ -921,9 +923,12 @@ getTensorExtractMemoryAccessPattern(tensor::ExtractOp extractOp,
   // TODO: Relax these conditions.
   // FIXME: This condition assumes non-dynamic sizes.
   if ((llvm::count_if(targetShape,
-                      [](int64_t dimSize) { return dimSize > 1; }) != 1) ||
+                      [](int64_t dimSize) { return dimSize > 1; }) > 2) ||
       targetShape.back() == 1)
     return VectorMemoryAccessKind::Gather;
+
+  // if (targetShape.back() == 1)
+  //   return VectorMemoryAccessKind::Gather;
 
   // 2. Assume that it's a gather load when reading _from_ a tensor for which
   // the trailing dimension is 1, e.g. `tensor<1x4x1xi32>`.
@@ -937,7 +942,7 @@ getTensorExtractMemoryAccessPattern(tensor::ExtractOp extractOp,
   // Look at the way each index is calculated and decide whether it is suitable
   // for a contiguous load, i.e. whether it's loop invariant.
   auto indices = extractOp.getIndices();
-  auto leadIndices = indices.drop_back(1);
+  auto leadIndices = indices.drop_back(2);
 
   for (auto [i, indexVal] : llvm::enumerate(leadIndices)) {
     if (inputShape.getShape()[i] == 1)
@@ -955,12 +960,14 @@ getTensorExtractMemoryAccessPattern(tensor::ExtractOp extractOp,
   // At this point we know that the leading indices are loop invariant. This
   // means that is potentially a scalar or a contiguous load. We can decide
   // based on the trailing idx.
-  auto extractOpTrailingIdx = indices.back();
+  auto extractOpTrailingIdx0 = indices.back();
+  auto extractOpTrailingIdx1 = indices[indices.size() - 2];
 
   // 4a. Scalar broadcast load
   // If the trailing index is loop invariant then this is a scalar load.
   if (leadingIdxsLoopInvariant &&
-      isLoopInvariantIdx(linalgOp, extractOpTrailingIdx)) {
+      isLoopInvariantIdx(linalgOp, extractOpTrailingIdx0) &&
+      isLoopInvariantIdx(linalgOp, extractOpTrailingIdx1)) {
     LDBG("Found scalar broadcast load: " << extractOp);
 
     return VectorMemoryAccessKind::ScalarBroadcast;
@@ -972,7 +979,9 @@ getTensorExtractMemoryAccessPattern(tensor::ExtractOp extractOp,
   // This is what the following bool captures.
   bool foundIndexOp = false;
   bool isContiguousLoad =
-      isContiguousLoadIdx(linalgOp, extractOpTrailingIdx, foundIndexOp);
+      isContiguousLoadIdx(linalgOp, extractOpTrailingIdx0, foundIndexOp);
+  isContiguousLoad &= foundIndexOp;
+  isContiguousLoad &= isContiguousLoadIdx(linalgOp, extractOpTrailingIdx1, foundIndexOp);
   isContiguousLoad &= foundIndexOp;
 
   if (isContiguousLoad) {
@@ -1025,6 +1034,8 @@ vectorizeTensorExtract(RewriterBase &rewriter, VectorizationState &state,
         maskConstantOp, passThruConstantOp);
     gatherOp = state.maskOperation(rewriter, gatherOp, linalgOp);
 
+    // gatherOp->dump();
+
     LDBG("Vectorised as gather load: " << extractOp << "\n");
     return VectorizationResult{VectorizationStatus::NewOp, gatherOp};
   }
@@ -1051,6 +1062,12 @@ vectorizeTensorExtract(RewriterBase &rewriter, VectorizationState &state,
   auto resTrailingDim = resultType.getShape().back();
   auto zero = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI32Type(), rewriter.getZeroAttr(rewriter.getI32Type()));
+
+  auto zeroIndex = rewriter.create<arith::ConstantOp>(
+      loc, rewriter.getIndexType(), rewriter.getZeroAttr(rewriter.getIndexType()));
+
+  bool switchFlag = resultType.getShape()[resultType.getShape().size() - 2] == 1;
+
   for (size_t i = 0; i < extractOp.getIndices().size(); i++) {
     auto idx = bvm.lookup(extractOp.getIndices()[i]);
     if (idx.getType().isIndex()) {
@@ -1058,11 +1075,37 @@ vectorizeTensorExtract(RewriterBase &rewriter, VectorizationState &state,
       continue;
     }
 
+    if (switchFlag) {
     auto indexAs1dVector = rewriter.create<vector::ShapeCastOp>(
         loc, VectorType::get({resTrailingDim}, rewriter.getIndexType()),
         bvm.lookup(extractOp.getIndices()[i]));
     transferReadIdxs.push_back(
         rewriter.create<vector::ExtractElementOp>(loc, indexAs1dVector, zero));
+    }
+    else {
+      // zero.dump();
+      Value checkElem = bvm.lookup(extractOp.getIndices()[i]);
+      checkElem.dump();
+      // ArrayRef<int64_t> zeroArrayRef(std::vector<int64_t>(resultType.getShape().size(), 0));
+
+      // ArrayRef<int64_t> zeroArrayRef(std::vector<int64_t>(checkElem.getResults()[0].getShape().size(), 0));
+
+      auto p = i == 0 ? 2 : 1;
+
+      // ArrayRef<int64_t> zeroArrayRef(std::vector<int64_t>(p, 0));
+
+      std::vector<int64_t> m(p, 0);
+      ArrayRef<int64_t> zeroArrayRef(m);
+
+      auto q = rewriter.create<vector::ExtractOp>(loc, checkElem, zeroArrayRef);
+      q.dump();
+
+      transferReadIdxs.push_back(q);
+      // transferReadIdxs.push_back(
+      //   rewriter.create<vector::ExtractOp>(loc, bvm.lookup(extractOp.getIndices()[i]), zeroArrayRef)
+      // );
+      // transferReadIdxs.push_back(zeroIndex);
+    }
   }
 
   // `tensor.extract_element` is always in-bounds, hence the following holds.
@@ -1105,6 +1148,8 @@ vectorizeTensorExtract(RewriterBase &rewriter, VectorizationState &state,
   auto transferReadOp = rewriter.create<vector::TransferReadOp>(
       loc, resultType, extractOp.getTensor(), transferReadIdxs, permutationMap,
       inBounds);
+
+  // transferReadOp.dump();
 
   LDBG("Vectorised as contiguous load: " << extractOp);
   return VectorizationResult{VectorizationStatus::NewOp, transferReadOp};
