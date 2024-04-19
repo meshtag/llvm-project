@@ -48,6 +48,31 @@ inline SmallVector<int64_t> computeStrides(ArrayRef<int64_t> sizes) {
   return computeSuffixProduct(sizes);
 }
 
+/// Given a set of sizes, return the suffix product.
+///
+/// When applied to slicing, this is the calculation needed to derive the
+/// strides (i.e. the number of linear indices to skip along the (k-1) most
+/// minor dimensions to get the next k-slice).
+///
+/// This is the basis to linearize an n-D offset confined to `[0 ... sizes]`.
+///
+/// Assuming `sizes` is `[s0, .. sn]`, return the vector<Value>
+///   `[s1 * ... * sn, s2 * ... * sn, ..., sn, 1]`.
+///
+/// It is the caller's responsibility to provide valid values which are expected
+/// to be constants with index type or results of dimension extraction ops
+/// (for ex. memref.dim op).
+///
+/// `sizes` elements are asserted to be non-negative.
+///
+/// Return an empty vector if `sizes` is empty.
+SmallVector<Value> computeSuffixProduct(Location loc, OpBuilder &builder,
+                                        ArrayRef<Value> sizes);
+inline SmallVector<Value> computeStrides(Location loc, OpBuilder &builder,
+                                         ArrayRef<Value> sizes) {
+  return computeSuffixProduct(loc, builder, sizes);
+}
+
 /// Return a vector containing llvm::zip_equal(v1, v2) multiplied elementwise.
 ///
 /// Return an empty vector if `v1` and `v2` are empty.

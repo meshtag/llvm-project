@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "mlir/Dialect/Utils/IndexingUtils.h"
+
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Utils/StaticValueUtils.h"
 #include "mlir/IR/AffineExpr.h"
 #include "mlir/IR/Builders.h"
@@ -26,6 +28,19 @@ SmallVector<ExprType> computeSuffixProductImpl(ArrayRef<ExprType> sizes,
   SmallVector<ExprType> strides(sizes.size(), unit);
   for (int64_t r = strides.size() - 2; r >= 0; --r)
     strides[r] = strides[r + 1] * sizes[r + 1];
+  return strides;
+}
+
+static SmallVector<Value> computeSuffixProductImpl(Location loc,
+                                                   OpBuilder &builder,
+                                                   ArrayRef<Value> sizes,
+                                                   Value unit) {
+  if (sizes.empty())
+    return {};
+  SmallVector<Value> strides(sizes.size(), unit);
+  for (int64_t r = strides.size() - 2; r >= 0; --r)
+    strides[r] =
+        builder.create<arith::MulIOp>(loc, strides[r + 1], sizes[r + 1]);
   return strides;
 }
 
@@ -195,6 +210,18 @@ SmallVector<AffineExpr> mlir::delinearize(AffineExpr linearIndex,
                                           ArrayRef<int64_t> strides) {
   MLIRContext *ctx = linearIndex.getContext();
   return delinearize(linearIndex, getAffineConstantExprs(strides, ctx));
+}
+
+//===----------------------------------------------------------------------===//
+// Utils that operate on compile time unknown values.
+//===----------------------------------------------------------------------===//
+
+SmallVector<Value> mlir::computeSuffixProduct(Location loc, OpBuilder &builder,
+                                              ArrayRef<Value> sizes) {
+  if (sizes.empty())
+    return {};
+  Value unit = builder.create<arith::ConstantIndexOp>(loc, 1);
+  return ::computeSuffixProductImpl(loc, builder, sizes, unit);
 }
 
 //===----------------------------------------------------------------------===//
