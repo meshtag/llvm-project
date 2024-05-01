@@ -15,6 +15,7 @@
 #include "mlir/Dialect/Arith/Utils/Utils.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/Vector/IR/VectorOps.h"
+#include "llvm/ADT/STLExtras.h"
 
 namespace mlir {
 namespace memref {
@@ -153,6 +154,27 @@ void eraseDeadAllocAndStores(RewriterBase &rewriter, Operation *parentOp) {
   });
   for (Operation *op : opToErase)
     rewriter.eraseOp(op);
+}
+
+static SmallVector<Value> computeSuffixProductIRBlockImpl(Location loc,
+                                                          OpBuilder &builder,
+                                                          ArrayRef<Value> sizes,
+                                                          Value unit) {
+  if (sizes.empty())
+    return {};
+  SmallVector<Value> strides(sizes.size(), unit);
+  for (int64_t r = strides.size() - 2; r >= 0; --r)
+    strides[r] =
+        builder.create<arith::MulIOp>(loc, strides[r + 1], sizes[r + 1]);
+  return strides;
+}
+
+SmallVector<Value> computeSuffixProductIRBlock(Location loc, OpBuilder &builder,
+                                               ArrayRef<Value> sizes) {
+  if (sizes.empty())
+    return {};
+  Value unit = builder.create<arith::ConstantIndexOp>(loc, 1);
+  return computeSuffixProductIRBlockImpl(loc, builder, sizes, unit);
 }
 
 } // namespace memref
