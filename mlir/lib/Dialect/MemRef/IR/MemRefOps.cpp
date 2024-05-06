@@ -2101,6 +2101,33 @@ verifyCollapsedShape(Operation *op, ArrayRef<int64_t> collapsedShape,
     return op->emitOpError("invalid number of reassociation groups: found ")
            << reassociation.size() << ", expected " << collapsedShape.size();
 
+  llvm::outs() << "I reached here meshtag!\n\n";
+  // if (isa<memref::ExpandShapeOp>(*op))
+  //   op->dump();
+  // op->dump();
+  // op->getType().dump();
+  // auto check = op->getOutputShape();
+  // auto expandShapeOp = op.dyn_cast<memref::ExpandShapeOp>();
+  auto expandShapeOp = dyn_cast<memref::ExpandShapeOp>(*op);
+  if (expandShapeOp) {
+    llvm::outs() << "I found an expand shape op!\n\n";
+    // auto check = expandShapeOp.getOutputShape();
+    auto check = expandShapeOp.getStaticOutputShapeAttr();
+    llvm::outs() << "new print begins\n";
+    check.dump();
+    llvm::outs() << "new print ends \n\n";
+    // for (auto c : check)
+    //   llvm::outs() << c << "\n\n";
+    // for (auto c : check)
+    //   c.dump();
+
+    // auto p = check.dereference_iterator(check.begin(), 0);
+    // p.dump();
+  
+    // for (Value p : check)
+    //   p.dump();
+  }
+
   // The next expected expanded dimension index (while iterating over
   // reassociation indices).
   int64_t nextDim = 0;
