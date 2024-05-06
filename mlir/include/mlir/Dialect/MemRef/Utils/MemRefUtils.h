@@ -85,9 +85,9 @@ void eraseDeadAllocAndStores(RewriterBase &rewriter, Operation *parentOp);
 /// The function emits an IR block which computes suffix product for provided
 /// sizes.
 SmallVector<Value> computeSuffixProductIRBlock(Location loc, OpBuilder &builder,
-                                               ArrayRef<Value> sizes);
+                                               ArrayRef<OpFoldResult> sizes);
 inline SmallVector<Value>
-computeStridesIRBlock(Location loc, OpBuilder &builder, ArrayRef<Value> sizes) {
+computeStridesIRBlock(Location loc, OpBuilder &builder, ArrayRef<OpFoldResult> sizes) {
   return computeSuffixProductIRBlock(loc, builder, sizes);
 }
 

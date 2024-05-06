@@ -158,7 +158,7 @@ void eraseDeadAllocAndStores(RewriterBase &rewriter, Operation *parentOp) {
 
 static SmallVector<Value> computeSuffixProductIRBlockImpl(Location loc,
                                                           OpBuilder &builder,
-                                                          ArrayRef<Value> sizes,
+                                                          ArrayRef<OpFoldResult> sizes,
                                                           Value unit) {
   if (sizes.empty())
     return {};
@@ -170,7 +170,7 @@ static SmallVector<Value> computeSuffixProductIRBlockImpl(Location loc,
 }
 
 SmallVector<Value> computeSuffixProductIRBlock(Location loc, OpBuilder &builder,
-                                               ArrayRef<Value> sizes) {
+                                               ArrayRef<OpFoldResult> sizes) {
   if (sizes.empty())
     return {};
   Value unit = builder.create<arith::ConstantIndexOp>(loc, 1);

@@ -71,6 +71,25 @@ resolveSourceIndicesExpandShape(Location loc, PatternRewriter &rewriter,
   // later.
   ShapedType resultType = expandShapeOp.getResultType();
 
+  // Capture expand_shape's input and resultant memref dimensions which are to be used
+  // in suffix product calculation later.
+  SmallVector<OpFoldResult> srcShape;
+  MemRefType srcType = expandShapeOp.getSrcType();
+  
+  for (int64_t i = 0, e = srcType.getRank(); i < e; ++i) {
+    if (srcType.isDynamicDim(i)) {
+      srcShape.push_back(rewriter.create<memref::DimOp>(loc, expandShapeOp.getSrc(), i).getResult());
+    } else {
+      srcShape.push_back(rewriter.getIndexAttr(srcType.getShape()[i]));
+    }
+  }
+
+  auto outputShape = inferExpandShapeOutputShape(
+      rewriter, loc, expandShapeOp.getResultType(),
+      expandShapeOp.getReassociationIndices(), srcShape);
+  if (!outputShape.has_value())
+    return failure();
+
   // Traverse all reassociation groups to determine the appropriate indices
   // corresponding to each one of them post op folding.
   for (ArrayRef<int64_t> groups : expandShapeOp.getReassociationIndices()) {
@@ -80,11 +99,11 @@ resolveSourceIndicesExpandShape(Location loc, PatternRewriter &rewriter,
     bool hasDynamicDims = false;
     int64_t groupSize = groups.size();
 
-    // Capture expand_shape's resultant memref dimensions which are to be used
-    // in suffix product calculation later.
     SmallVector<int64_t> sizes(groupSize);
+    SmallVector<OpFoldResult> sizes1(groupSize);
     for (int64_t i = 0; i < groupSize; ++i) {
       sizes[i] = expandShapeOp.getResultType().getDimSize(groups[i]);
+      sizes1[i] = (*outputShape)[groups[i]];
       if (resultType.isDynamicDim(groups[i]))
         hasDynamicDims = true;
     }
@@ -115,8 +134,9 @@ resolveSourceIndicesExpandShape(Location loc, PatternRewriter &rewriter,
       }
 
       // Calculate suffix product of previously obtained dimension sizes.
-      SmallVector<Value> suffixProduct =
-          memref::computeSuffixProductIRBlock(loc, rewriter, sizesVal);
+      // SmallVector<Value> suffixProduct =
+      //     memref::computeSuffixProductIRBlock(loc, rewriter, sizesVal);
+      SmallVector<Value> suffixProduct = memref::computeSuffixProductIRBlock(loc, rewriter, sizes1);
 
       // Create affine expression variables for symbols in the newly constructed
       // affine map.
