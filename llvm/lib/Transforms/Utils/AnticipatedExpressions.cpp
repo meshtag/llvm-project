@@ -16,91 +16,110 @@
 
 using namespace llvm;
 
+#include "llvm/ADT/PostOrderIterator.h" // Required for reverse traversal
+#include "llvm/IR/Function.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/Support/raw_ostream.h"
+#include <map>
+#include <set>
+
+#include "llvm/Analysis/DominanceFrontier.h"
+#include "llvm/IR/Dominators.h" // ✅ Correct header for DominatorTree
+
+
+
+using namespace llvm;
+
 void computeAnticipatedExpressions(
     Function &F, std::map<BasicBlock *, std::set<Value *>> &IN,
     std::map<BasicBlock *, std::set<Value *>> &OUT) {
-  // Initialize GEN and KILL sets for each basic block
+  
   std::map<BasicBlock *, std::set<Value *>> GEN, KILL;
 
+  // Compute GEN sets
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
       if (auto *BI = dyn_cast<BinaryOperator>(&I)) {
         GEN[&BB].insert(BI);
       }
-      // Handle other types of instructions if necessary
     }
   }
 
   // Initialize OUT sets
   for (BasicBlock &BB : F) {
-    OUT[&BB] = GEN[&BB];
+    OUT[&BB] = {};
   }
 
   // Iterate until convergence
   bool changed;
   do {
     changed = false;
-    for (BasicBlock &BB : F) {
-      std::set<Value *> newIN;
-      for (BasicBlock *Pred : predecessors(&BB)) {
-        for (Value *V : OUT[Pred]) {
-          newIN.insert(V);
+
+    for (BasicBlock &BB : reverse(F)) { // ✅ Use reverse() instead of rbegin()/rend()
+      std::set<Value *> newOUT;
+      for (BasicBlock *Succ : successors(&BB)) {
+        if (!IN[Succ].empty()) {
+          if (newOUT.empty()) {
+            newOUT = IN[Succ]; // First successor, copy directly
+          } else {
+            std::set<Value *> temp;
+            std::set_intersection(newOUT.begin(), newOUT.end(),
+                                  IN[Succ].begin(), IN[Succ].end(),
+                                  std::inserter(temp, temp.begin()));
+            newOUT = temp; // Intersection with next successor
+          }
         }
       }
-      IN[&BB] = newIN;
+      OUT[&BB] = newOUT;
 
-      std::set<Value *> newOUT = IN[&BB];
+      // Compute IN[BB] = GEN[BB] ∪ (OUT[BB] - KILL[BB])
+      std::set<Value *> newIN = OUT[&BB];
       for (Value *V : KILL[&BB]) {
-        newOUT.erase(V);
+        newIN.erase(V);
       }
       for (Value *V : GEN[&BB]) {
-        newOUT.insert(V);
+        newIN.insert(V);
       }
 
-      if (newOUT != OUT[&BB]) {
-        OUT[&BB] = newOUT;
+      if (newIN != IN[&BB]) {
+        IN[&BB] = newIN;
         changed = true;
       }
     }
   } while (changed);
 }
 
+
 PreservedAnalyses AnticipatedExpressionsPass::run(Function &F,
                                                   FunctionAnalysisManager &AM) {
-  errs() << F.getName() << "\n";
+  errs() << "Processing function: " << F.getName() << "\n";
 
   std::map<BasicBlock *, std::set<Value *>> IN, OUT;
   computeAnticipatedExpressions(F, IN, OUT);
 
-  // Hoist anticipated expressions
   bool changed = false;
-  for (BasicBlock &BB : F) {
-    for (Value *V : IN[&BB]) {
-      if (auto *I = dyn_cast<Instruction>(V)) {
-        // Check if the instruction can be hoisted
-        if (I->getParent() != &BB && I->hasOneUse()) {
-          // // Hoist the instruction to the entry block
-          // I->moveBefore(&*BB.getFirstInsertionPt());
-          // // NumHoisted++;
-          // changed = true;
+  DominatorTree DT(F); // ✅ Correct usage of DominatorTree
 
-          // // Update all uses of the hoisted instruction
-          // for (auto *U : I->users()) {
-          //   if (auto *Phi = dyn_cast<PHINode>(U)) {
-          //     // Update the incoming value in the phi node
-          //     for (unsigned i = 0; i < Phi->getNumIncomingValues(); ++i) {
-          //       if (Phi->getIncomingValue(i) == I) {
-          //         Phi->setIncomingValue(i, I);
-          //       }
-          //     }
-          //   }
-          // }
+  for (BasicBlock &BB : F) {
+    for (Value *V : OUT[&BB]) { // ✅ Use OUT instead of IN
+      if (auto *I = dyn_cast<Instruction>(V)) {
+        if (I->getParent() == &BB) continue; // Already in this block
+
+        // Find the best hoisting point (earliest common dominator)
+        BasicBlock *HoistTo = &F.getEntryBlock(); // Default to function entry
+        for (BasicBlock *Succ : successors(&BB)) {
+          HoistTo = DT.findNearestCommonDominator(HoistTo, Succ);
+        }
+
+        // Ensure the hoist target is valid
+        if (HoistTo && HoistTo != I->getParent()) {
+          I->moveBefore(&*HoistTo->getFirstInsertionPt()); // ✅ Move before first real instruction
+          changed = true;
         }
       }
     }
   }
 
-  // return changed;
-
-  return PreservedAnalyses::all();
+  return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
