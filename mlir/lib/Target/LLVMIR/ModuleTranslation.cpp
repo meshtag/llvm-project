@@ -975,6 +975,27 @@ LogicalResult ModuleTranslation::convertGlobals() {
         anyExternalLinkage ? nullptr : cst, op.sym_name(),
         /*InsertBefore=*/nullptr, llvm::GlobalValue::NotThreadLocal, addrSpace);
 
+    if (auto alignAttr = op->getAttrOfType<IntegerAttr>("alignment")) {
+      uint64_t alignment = alignAttr.getValue().getZExtValue();
+      if (alignment != 0)
+        var->setAlignment(llvm::Align(alignment));
+    }
+    if (auto sectionAttr = op->getAttrOfType<StringAttr>("section"))
+      var->setSection(sectionAttr.getValue());
+    if (op->getAttrOfType<UnitAttr>("dso_local"))
+      var->setDSOLocal(true);
+    if (auto unnamedAttr = op->getAttrOfType<StringAttr>("unnamed_addr")) {
+      auto unnamed = unnamedAttr.getValue();
+      if (unnamed == "local") {
+        var->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Local);
+      } else if (unnamed == "global") {
+        var->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
+      } else {
+        return emitError(op.getLoc(),
+                         "expected unnamed_addr to be \"local\" or \"global\"");
+      }
+    }
+
     globalsMapping.try_emplace(op, var);
   }
 
