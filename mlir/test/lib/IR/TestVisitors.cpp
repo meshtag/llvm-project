@@ -8,6 +8,7 @@
 
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Iterators.h"
+#include "mlir/IR/Region.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "mlir/Pass/Pass.h"
 
@@ -184,6 +185,27 @@ static void testNoSkipErasureCallbacks(Operation *op) {
       llvm::outs() << "Erasing ";
       printBlock(block);
       llvm::outs() << "\n";
+
+      for (Operation &op : *block) {
+        // Only drop intra-region uses. We only expect to visit the block
+        // parent ops in post-order, so we can safely erase the block if
+        // nothing outside the surrounding region still needs it.
+        Region *opRegion = op.getParentRegion();
+        Operation *opRegionHolder =
+            opRegion ? opRegion->getParentOp() : nullptr;
+        if (!opRegionHolder)
+          continue;
+        for (OpOperand &use : llvm::make_early_inc_range(op.getUses())) {
+          Operation *user = use.getOwner();
+          Region *userRegion = user->getParentRegion();
+          Operation *userRegionHolder =
+              userRegion ? userRegion->getParentOp() : nullptr;
+          if (userRegionHolder == opRegionHolder)
+            use.drop(); // Drop only when both ops live under the same region
+                        // holder.
+        }
+      }
+
       block->erase();
     } else {
       llvm::outs() << "Cannot erase ";
