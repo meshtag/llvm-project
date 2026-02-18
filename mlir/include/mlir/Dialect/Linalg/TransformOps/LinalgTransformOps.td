@@ -1903,10 +1903,12 @@ def SplitReductionOp : Op<Transform_Dialect, "structured.split_reduction",
 // TileReductionUsingForOp
 //===----------------------------------------------------------------------===//
 
-def TileReductionUsingForOp : Op<Transform_Dialect, "structured.tile_reduction_using_for",
-       [FunctionalStyleTransformOpTrait, MemoryEffectsOpInterface,
-        TransformEachOpTrait, TransformOpInterface,
-        ReportTrackingListenerFailuresOpTrait]> {
+def TileReductionUsingForOp
+    : Op<Transform_Dialect, "structured.tile_reduction_using_for",
+         [FunctionalStyleTransformOpTrait,
+          DeclareOpInterfaceMethods<MemoryEffectsOpInterface>,
+          DeclareOpInterfaceMethods<TransformOpInterface>,
+          ReportTrackingListenerFailuresOpTrait]> {
   let description = [{
     Indicates that the given `target` op should be transformed with the
     `tileReduction` transformation with the tile size provided as attribute.
@@ -1980,34 +1982,30 @@ def TileReductionUsingForOp : Op<Transform_Dialect, "structured.tile_reduction_u
     ```
   }];
 
-  // TODO: support mixed static-dynamic (see TileUsingForallOp).
   let arguments = (ins TransformHandleTypeInterface:$target,
-                   DefaultValuedAttr<I64ArrayAttr, "{}">:$reduction_dims,
-                   DefaultValuedAttr<I64ArrayAttr, "{}">:$tile_sizes);
+      Variadic<TransformAnyParamTypeOrAnyHandle>:$dynamic_sizes,
+      DefaultValuedAttr<I64ArrayAttr, "{}">:$reduction_dims,
+      DefaultValuedOptionalAttr<DenseI64ArrayAttr, "{}">:$static_sizes);
   let results = (outs Variadic<TransformHandleTypeInterface>:$fill_op,
                       TransformHandleTypeInterface:$split_op,
                       TransformHandleTypeInterface:$combining_op,
                       TransformHandleTypeInterface:$for_op);
 
-  let builders = [
-    OpBuilder<(ins "Value":$target,
-                   "ArrayRef<int64_t>":$staticTileSizes)>
-  ];
+  let builders = [OpBuilder<(ins "Value":$target,
+                      "ArrayRef<int64_t>":$staticTileSizes)>,
+                  OpBuilder<(ins "Value":$target,
+                      "ArrayRef<OpFoldResult>":$mixedTileSizes)>];
 
   let assemblyFormat = [{
     $target
     (`reduction_dims` `=` $reduction_dims^)?
-    `by` `tile_sizes` `=` $tile_sizes
+    `by` `tile_sizes` custom<DynamicIndexList>($dynamic_sizes, $static_sizes)
     attr-dict
     `:` functional-type(operands, results)
   }];
 
   let extraClassDeclaration = [{
-    ::mlir::DiagnosedSilenceableFailure applyToOne(
-        ::mlir::transform::TransformRewriter &rewriter,
-        Operation *target,
-        ::mlir::transform::ApplyToEachResultList &results,
-        ::mlir::transform::TransformState &state);
+    SmallVector<OpFoldResult> getMixedSizes();
   }];
 }
 

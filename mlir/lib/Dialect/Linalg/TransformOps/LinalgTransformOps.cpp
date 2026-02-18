@@ -3136,66 +3136,186 @@ DiagnosedSilenceableFailure transform::SplitReductionOp::applyToOne(
 void transform::TileReductionUsingForOp::build(
     OpBuilder &builder, OperationState &result, Value target,
     ArrayRef<int64_t> staticTileSizes) {
+  build(builder, result, target,
+        getAsOpFoldResult(builder.getI64ArrayAttr(staticTileSizes)));
+}
+
+void transform::TileReductionUsingForOp::build(
+    OpBuilder &builder, OperationState &result, Value target,
+    ArrayRef<OpFoldResult> mixedTileSizes) {
+  SmallVector<int64_t> staticTileSizes;
+  SmallVector<Value> dynamicTileSizes;
+  dispatchIndexOpFoldResults(mixedTileSizes, dynamicTileSizes, staticTileSizes);
   // Call the default builder.
   // This is future-proof re mixed static-dynamic and setting up the proper
   // operands segment sizes attributes for multiple variadic operands.
   // In the absence of this, horrible bugs ensue.
-  // TODO: support mixed static-dynamic (see TileUsingForallOp).
   MLIRContext *ctx = builder.getContext();
   auto opTy = transform::AnyOpType::get(ctx);
-  auto staticTileSizesAttr = builder.getI64ArrayAttr(staticTileSizes);
+  auto staticTileSizesAttr = builder.getDenseI64ArrayAttr(staticTileSizes);
   build(builder, result,
         /*resultTypes=*/TypeRange{opTy, opTy, opTy, opTy},
         /*target=*/target,
+        /*dynamic_sizes=*/dynamicTileSizes,
         /*reduction_dims=*/nullptr,
-        /*tile_sizes=*/staticTileSizesAttr);
+        /*static_sizes=*/staticTileSizesAttr);
 }
 
-DiagnosedSilenceableFailure transform::TileReductionUsingForOp::applyToOne(
-    transform::TransformRewriter &rewriter, Operation *target,
-    transform::ApplyToEachResultList &results,
-    transform::TransformState &state) {
-  rewriter.setInsertionPoint(target);
+DiagnosedSilenceableFailure transform::TileReductionUsingForOp::apply(
+    transform::TransformRewriter &rewriter, TransformResults &transformResults,
+    TransformState &state) {
+  SmallVector<Operation *> targets =
+      llvm::to_vector(state.getPayloadOps(getTarget()));
+  SmallVector<SmallVector<Operation *>> fillOps(getFillOp().size());
+  SmallVector<Operation *> splitOps;
+  SmallVector<Operation *> combiningOps;
+  SmallVector<Operation *> forOps;
+  SmallVector<SmallVector<Operation *>> dynamicSizeProducers;
+  SmallVector<SmallVector<int64_t>> paramSizes;
+  dynamicSizeProducers.reserve(getDynamicSizes().size());
+  paramSizes.reserve(getDynamicSizes().size());
+  for (Value transformValue : getDynamicSizes()) {
+    if (isa<ParamType>(transformValue.getType())) {
+      dynamicSizeProducers.push_back({});
+      ArrayRef<Attribute> params = state.getParams(transformValue);
+      paramSizes.push_back(llvm::map_to_vector(params, [](Attribute attr) {
+        return cast<IntegerAttr>(attr).getValue().getSExtValue();
+      }));
+      if (paramSizes.back().size() != targets.size()) {
+        DiagnosedSilenceableFailure diag =
+            emitSilenceableError()
+            << "expected as many parameter values (" << paramSizes.back().size()
+            << ") as target ops (" << targets.size() << ")";
+        diag.attachNote(transformValue.getLoc()) << "for this parameter";
+        return diag;
+      }
+      continue;
+    }
 
-  auto partialReductionOp = dyn_cast<PartialReductionOpInterface>(target);
-  if (!partialReductionOp) {
-    return emitSilenceableFailure(
-        target->getLoc(),
-        "Operation should implement PartialReductionOpInterface");
-  }
+    paramSizes.push_back({});
+    dynamicSizeProducers.push_back(
+        llvm::to_vector(state.getPayloadOps(transformValue)));
+    if (dynamicSizeProducers.back().size() != targets.size()) {
+      DiagnosedSilenceableFailure diag =
+          emitSilenceableError()
+          << "expected as many dynamic size-producing operations ("
+          << dynamicSizeProducers.back().size() << ") as target ops ("
+          << targets.size() << ")";
+      diag.attachNote(transformValue.getLoc()) << "for this handle";
+      return diag;
+    }
 
-  SmallVector<unsigned> reductionDims =
-      extractFromIntegerArrayAttr<unsigned>(getReductionDims());
-  if (reductionDims.empty()) {
-    for (auto [idx, iteratorType] :
-         llvm::enumerate(partialReductionOp.getLoopIteratorTypes())) {
-      if (iteratorType == utils::IteratorType::reduction)
-        reductionDims.push_back(idx);
+    for (Operation *op : dynamicSizeProducers.back()) {
+      if (op->getNumResults() == 1 &&
+          isa<IndexType>(op->getResult(0).getType())) {
+        continue;
+      }
+      DiagnosedSilenceableFailure diag =
+          emitSilenceableError() << "expected sizes to be produced by ops "
+                                    "with a single index-type result";
+      diag.attachNote(op->getLoc()) << "size producer op";
+      diag.attachNote(transformValue.getLoc()) << "for this handle";
+      return diag;
     }
   }
 
-  scf::SCFTilingOptions options;
-  options.setLoopType(scf::SCFTilingOptions::LoopType::ForOp);
-  options.setReductionTilingStrategy(
-      ReductionTilingStrategy::PartialReductionOuterReduction);
-  options.setTileSizes(getAsOpFoldResult(getTileSizesAttr()));
-  options.setReductionDims(reductionDims);
-  FailureOr<scf::SCFTilingResult> result =
-      scf::tileUsingSCF(rewriter, partialReductionOp, options);
+  auto mixedSizes = getMixedSizes();
 
-  if (failed(result)) {
-    return emitSilenceableFailure(getLoc(),
-                                  "failed to tile using partial reduction");
+  for (auto [i, target] : llvm::enumerate(targets)) {
+    rewriter.setInsertionPoint(target);
+    auto partialReductionOp = dyn_cast<PartialReductionOpInterface>(target);
+    if (!partialReductionOp) {
+      return emitSilenceableError()
+             << "only ops implementing PartialReductionOpInterface are "
+                "supported";
+    }
+
+    SmallVector<unsigned> reductionDims =
+        extractFromIntegerArrayAttr<unsigned>(getReductionDims());
+    if (reductionDims.empty()) {
+      for (auto [idx, iteratorType] :
+           llvm::enumerate(partialReductionOp.getLoopIteratorTypes())) {
+        if (iteratorType == utils::IteratorType::reduction)
+          reductionDims.push_back(idx);
+      }
+    }
+
+    scf::SCFTilingOptions options;
+    options.setLoopType(scf::SCFTilingOptions::LoopType::ForOp);
+    options.setReductionTilingStrategy(
+        ReductionTilingStrategy::PartialReductionOuterReduction);
+    SmallVector<OpFoldResult> tileSizes;
+    tileSizes.reserve(mixedSizes.size());
+    unsigned dynamicIdx = 0;
+    for (OpFoldResult ofr : mixedSizes) {
+      if (auto attr = dyn_cast<Attribute>(ofr)) {
+        tileSizes.push_back(attr);
+        continue;
+      }
+
+      ArrayRef<Operation *> dynamicSizes = dynamicSizeProducers[dynamicIdx];
+      ArrayRef<int64_t> params = paramSizes[dynamicIdx];
+      ++dynamicIdx;
+      assert((dynamicSizes.empty() ^ params.empty()) &&
+             "expected either dynamic sizes or parameters");
+      if (!params.empty())
+        tileSizes.push_back(rewriter.getIndexAttr(params[i]));
+      else
+        tileSizes.push_back(dynamicSizes[i]->getResult(0));
+    }
+    options.setTileSizes(tileSizes);
+    options.setReductionDims(reductionDims);
+    FailureOr<scf::SCFTilingResult> result =
+        scf::tileUsingSCF(rewriter, partialReductionOp, options);
+
+    if (failed(result)) {
+      return emitSilenceableError() << "failed to tile using partial reduction";
+    }
+
+    rewriter.replaceOp(target, result->replacements);
+    if (result->initialValues.size() > getFillOp().size()) {
+      return emitDefiniteFailure()
+             << "expected at most " << getFillOp().size()
+             << " fill result handles, got " << result->initialValues.size();
+    }
+    for (auto [fillIdx, initValue] : llvm::enumerate(result->initialValues))
+      fillOps[fillIdx].push_back(initValue.getDefiningOp());
+    llvm::append_range(splitOps, result->tiledOps);
+    llvm::append_range(combiningOps, result->mergeOps);
+    forOps.push_back(result->loops.front());
   }
-  rewriter.replaceOp(target, result->replacements);
-  for (Value initValue : result->initialValues)
-    results.push_back(initValue.getDefiningOp());
-  for (auto parallelTiledOp : result->tiledOps)
-    results.push_back(parallelTiledOp);
-  for (auto mergeOp : result->mergeOps)
-    results.push_back(mergeOp);
-  results.push_back(result->loops.front());
+
+  for (auto [fillHandleIdx, fillHandle] : llvm::enumerate(getFillOp()))
+    transformResults.set(cast<OpResult>(fillHandle), fillOps[fillHandleIdx]);
+  transformResults.set(cast<OpResult>(getSplitOp()), splitOps);
+  transformResults.set(cast<OpResult>(getCombiningOp()), combiningOps);
+  transformResults.set(cast<OpResult>(getForOp()), forOps);
   return DiagnosedSilenceableFailure::success();
+}
+
+SmallVector<OpFoldResult> transform::TileReductionUsingForOp::getMixedSizes() {
+  ValueRange dynamic = getDynamicSizes();
+  ArrayRef<int64_t> tileSizes = getStaticSizes();
+  SmallVector<OpFoldResult> results;
+  results.reserve(tileSizes.size());
+  unsigned dynamicPos = 0;
+  Builder builder(getContext());
+  for (int64_t size : tileSizes) {
+    if (size == ShapedType::kDynamic) {
+      results.push_back(dynamic[dynamicPos++]);
+    } else {
+      results.push_back(builder.getIndexAttr(size));
+    }
+  }
+  return results;
+}
+
+void transform::TileReductionUsingForOp::getEffects(
+    SmallVectorImpl<MemoryEffects::EffectInstance> &effects) {
+  consumesHandle(getTargetMutable(), effects);
+  onlyReadsHandle(getDynamicSizesMutable(), effects);
+  producesHandle(getOperation()->getOpResults(), effects);
+  modifiesPayload(effects);
 }
 
 //===----------------------------------------------------------------------===//

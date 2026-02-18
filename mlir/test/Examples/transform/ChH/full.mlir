@@ -211,7 +211,7 @@ module attributes { transform.with_named_sequence } {
     %red_fill, %conv4, %combining, %rz_ry_rx
     = transform.structured.tile_reduction_using_for %conv3 by
     //            n  y  x  c  rz ry rx
-      tile_sizes=[0, 0, 0, 0, 1, 1, 1]
+      tile_sizes [0, 0, 0, 0, 1, 1, 1]
       : (!transform.any_op)
       -> (!transform.any_op, !transform.any_op, !transform.any_op,
           !transform.any_op)
